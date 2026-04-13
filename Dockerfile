@@ -7,6 +7,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# Install CPU-only PyTorch first (no NVIDIA/CUDA bloat)
+RUN pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir torchcodec
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
