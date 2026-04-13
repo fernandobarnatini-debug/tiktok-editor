@@ -1,16 +1,27 @@
 import json
 import os
+import struct
 import subprocess
 import tempfile
+import wave
 import requests
 import torch
 
 # Load VAD model once
 torch.hub._validate_not_a_forked_repo = lambda a, b, c: True
 _vad_model, _vad_utils = torch.hub.load("snakers4/silero-vad", "silero_vad", trust_repo=True)
-_get_speech_timestamps, _, _read_audio, _, _ = _vad_utils
+_get_speech_timestamps = _vad_utils[0]
 
 SAMPLING_RATE = 16000
+
+
+def _read_wav_as_tensor(path: str) -> torch.Tensor:
+    """Read a 16-bit mono WAV file into a float32 torch tensor. No torchaudio needed."""
+    with wave.open(path, "rb") as wf:
+        n_frames = wf.getnframes()
+        raw = wf.readframes(n_frames)
+    samples = struct.unpack(f"<{n_frames}h", raw)
+    return torch.tensor(samples, dtype=torch.float32) / 32768.0
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL = "google/gemini-2.0-flash-001"
 
@@ -60,7 +71,7 @@ def _get_vad_ranges(video_path: str) -> list[dict]:
             capture_output=True, check=True,
         )
 
-        wav = _read_audio(tmp_audio)
+        wav = _read_wav_as_tensor(tmp_audio)
         timestamps = _get_speech_timestamps(wav, _vad_model, sampling_rate=SAMPLING_RATE)
 
         probe = subprocess.run(
