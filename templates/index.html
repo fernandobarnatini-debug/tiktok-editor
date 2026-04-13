@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TikTok Dead Space Remover</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #0a0a0a;
+    color: #e8e8e8;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 40px 20px;
+  }
+
+  h1 {
+    font-size: 28px;
+    font-weight: 700;
+    margin-bottom: 6px;
+  }
+
+  h1 span { color: #fe2c55; }
+
+  .subtitle {
+    color: #888;
+    font-size: 14px;
+    margin-bottom: 36px;
+  }
+
+  .container {
+    width: 100%;
+    max-width: 520px;
+  }
+
+  /* Upload area */
+  .drop-zone {
+    border: 2px dashed #333;
+    border-radius: 16px;
+    padding: 48px 24px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+    margin-bottom: 20px;
+  }
+
+  .drop-zone:hover, .drop-zone.drag-over {
+    border-color: #fe2c55;
+    background: rgba(254, 44, 85, 0.05);
+  }
+
+  .drop-zone.has-file {
+    border-color: #25f4ee;
+    background: rgba(37, 244, 238, 0.05);
+  }
+
+  .drop-icon {
+    font-size: 40px;
+    margin-bottom: 12px;
+    display: block;
+  }
+
+  .drop-text {
+    font-size: 15px;
+    color: #aaa;
+  }
+
+  .drop-text strong { color: #fe2c55; }
+
+  .file-name {
+    color: #25f4ee;
+    font-size: 14px;
+    margin-top: 8px;
+    word-break: break-all;
+  }
+
+  .file-input { display: none; }
+
+  /* Buttons */
+  .buttons {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+
+  .btn {
+    flex: 1;
+    padding: 14px 20px;
+    border: none;
+    border-radius: 10px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.2s, transform 0.1s;
+  }
+
+  .btn:active { transform: scale(0.98); }
+
+  .btn-primary {
+    background: #fe2c55;
+    color: #fff;
+  }
+
+  .btn-primary:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    transform: none;
+  }
+
+  .btn-secondary {
+    background: #1a1a1a;
+    color: #555;
+    border: 1px solid #2a2a2a;
+    cursor: default;
+    position: relative;
+  }
+
+  .btn-secondary .badge {
+    font-size: 9px;
+    background: #333;
+    color: #777;
+    padding: 2px 6px;
+    border-radius: 4px;
+    margin-left: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  /* Spinner */
+  .processing {
+    display: none;
+    text-align: center;
+    padding: 32px 0;
+  }
+
+  .processing.active { display: block; }
+
+  .spinner {
+    width: 40px;
+    height: 40px;
+    border: 3px solid #222;
+    border-top-color: #fe2c55;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin: 0 auto 16px;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .processing-text {
+    color: #888;
+    font-size: 14px;
+  }
+
+  .processing-step {
+    color: #fe2c55;
+    font-size: 13px;
+    margin-top: 6px;
+  }
+
+  /* Results */
+  .results {
+    display: none;
+  }
+
+  .results.active { display: block; }
+
+  .stats-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+
+  .stat-card {
+    background: #141414;
+    border: 1px solid #222;
+    border-radius: 12px;
+    padding: 16px;
+    text-align: center;
+  }
+
+  .stat-value {
+    font-size: 26px;
+    font-weight: 700;
+    color: #fff;
+  }
+
+  .stat-value.highlight { color: #25f4ee; }
+  .stat-value.red { color: #fe2c55; }
+
+  .stat-label {
+    font-size: 12px;
+    color: #666;
+    margin-top: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .btn-download {
+    display: block;
+    width: 100%;
+    padding: 16px;
+    background: #25f4ee;
+    color: #000;
+    border: none;
+    border-radius: 10px;
+    font-size: 16px;
+    font-weight: 700;
+    cursor: pointer;
+    text-align: center;
+    text-decoration: none;
+    transition: opacity 0.2s;
+    margin-bottom: 12px;
+  }
+
+  .btn-download:hover { opacity: 0.9; }
+
+  .btn-reset {
+    display: block;
+    width: 100%;
+    padding: 12px;
+    background: transparent;
+    color: #555;
+    border: 1px solid #222;
+    border-radius: 10px;
+    font-size: 14px;
+    cursor: pointer;
+  }
+
+  .error {
+    display: none;
+    background: rgba(254, 44, 85, 0.1);
+    border: 1px solid #fe2c55;
+    border-radius: 10px;
+    padding: 16px;
+    color: #fe2c55;
+    font-size: 14px;
+    margin-bottom: 20px;
+  }
+
+  .error.active { display: block; }
+</style>
+</head>
+<body>
+
+<h1><span>TikTok</span> Dead Space Remover</h1>
+<p class="subtitle">Upload a video. AI removes the dead air. Download the clean cut.</p>
+
+<div class="container">
+  <div class="drop-zone" id="dropZone">
+    <span class="drop-icon">&#x1F3AC;</span>
+    <p class="drop-text">Drop your video here or <strong>click to browse</strong></p>
+    <p class="drop-text" style="font-size:12px; margin-top:6px; color:#555">MP4, MOV, AVI, MKV, WebM ��� max 300MB</p>
+    <p class="file-name" id="fileName"></p>
+    <input type="file" class="file-input" id="fileInput" accept=".mp4,.mov,.avi,.mkv,.webm">
+  </div>
+
+  <div class="buttons" id="buttons">
+    <button class="btn btn-primary" id="btnProcess" disabled>Remove Dead Space</button>
+    <button class="btn btn-secondary" disabled>Remove Fillers <span class="badge">Coming Soon</span></button>
+  </div>
+
+  <div class="error" id="error"></div>
+
+  <div class="processing" id="processing">
+    <div class="spinner"></div>
+    <p class="processing-text">Processing your video...</p>
+    <p class="processing-step" id="processingStep">Extracting audio & transcribing</p>
+  </div>
+
+  <div class="results" id="results">
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-value" id="statOriginal">—</div>
+        <div class="stat-label">Original</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value highlight" id="statFinal">—</div>
+        <div class="stat-label">Final</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value red" id="statRemoved">—</div>
+        <div class="stat-label">Dead Space</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" id="statCuts">—</div>
+        <div class="stat-label">Cuts Made</div>
+      </div>
+    </div>
+    <a class="btn-download" id="btnDownload" href="#">Download Clean Video</a>
+    <button class="btn-reset" id="btnReset">Process Another Video</button>
+  </div>
+</div>
+
+<script>
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+const fileName = document.getElementById('fileName');
+const btnProcess = document.getElementById('btnProcess');
+const buttons = document.getElementById('buttons');
+const processing = document.getElementById('processing');
+const processingStep = document.getElementById('processingStep');
+const results = document.getElementById('results');
+const error = document.getElementById('error');
+
+let selectedFile = null;
+
+// Drag & drop
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('drag-over');
+  if (e.dataTransfer.files.length) selectFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', () => { if (fileInput.files.length) selectFile(fileInput.files[0]); });
+
+function selectFile(file) {
+  selectedFile = file;
+  fileName.textContent = file.name + ' (' + (file.size / 1024 / 1024).toFixed(1) + ' MB)';
+  dropZone.classList.add('has-file');
+  btnProcess.disabled = false;
+}
+
+// Process
+btnProcess.addEventListener('click', async () => {
+  if (!selectedFile) return;
+
+  error.classList.remove('active');
+  buttons.style.display = 'none';
+  processing.classList.add('active');
+  results.classList.remove('active');
+
+  const steps = [
+    'Extracting audio & transcribing...',
+    'AI analyzing transcript for dead space...',
+    'Cutting video segments...',
+    'Concatenating final video...'
+  ];
+  let step = 0;
+  const stepInterval = setInterval(() => {
+    step = Math.min(step + 1, steps.length - 1);
+    processingStep.textContent = steps[step];
+  }, 8000);
+
+  const form = new FormData();
+  form.append('video', selectedFile);
+
+  try {
+    const res = await fetch('/upload', { method: 'POST', body: form });
+    const data = await res.json();
+    clearInterval(stepInterval);
+
+    if (data.error) {
+      showError(data.error);
+      return;
+    }
+
+    document.getElementById('statOriginal').textContent = formatTime(data.original_duration);
+    document.getElementById('statFinal').textContent = formatTime(data.final_duration);
+    document.getElementById('statRemoved').textContent = data.dead_space_percentage + '%';
+    document.getElementById('statCuts').textContent = data.segments_kept;
+    document.getElementById('btnDownload').href = data.download_url;
+
+    processing.classList.remove('active');
+    results.classList.add('active');
+  } catch (err) {
+    clearInterval(stepInterval);
+    showError('Processing failed: ' + err.message);
+  }
+});
+
+function showError(msg) {
+  processing.classList.remove('active');
+  error.textContent = msg;
+  error.classList.add('active');
+  buttons.style.display = 'flex';
+}
+
+function formatTime(seconds) {
+  if (seconds < 60) return seconds.toFixed(1) + 's';
+  const m = Math.floor(seconds / 60);
+  const s = (seconds % 60).toFixed(1);
+  return m + ':' + s.padStart(4, '0');
+}
+
+// Reset
+document.getElementById('btnReset').addEventListener('click', () => {
+  selectedFile = null;
+  fileInput.value = '';
+  fileName.textContent = '';
+  dropZone.classList.remove('has-file');
+  btnProcess.disabled = true;
+  results.classList.remove('active');
+  error.classList.remove('active');
+  buttons.style.display = 'flex';
+});
+</script>
+</body>
+</html>
