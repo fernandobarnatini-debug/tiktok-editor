@@ -1,0 +1,7 @@
+flask
+openai-whisper
+requests
+torch
+torchaudio
+torchcodec
+packaging
