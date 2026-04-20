@@ -26,6 +26,17 @@ enum AudioExtractor {
             throw AudioExtractorError.noAudioTrack
         }
 
+        // Diagnostic: log any mismatch between video duration and audio
+        // track's placement in the composition. A non-zero timeRange.start
+        // means Whisper word times (relative to the WAV) will be shifted
+        // from AVPlayer video times by that offset.
+        let videoDur = (try? await asset.load(.duration)).map { CMTimeGetSeconds($0) } ?? -1
+        let trackRange = (try? await track.load(.timeRange)) ?? CMTimeRange.zero
+        let trackStart = CMTimeGetSeconds(trackRange.start)
+        let trackDur = CMTimeGetSeconds(trackRange.duration)
+        NSLog("[AudioExtractor] videoDuration=%.3fs audioTrack.start=%.3fs audioTrack.duration=%.3fs",
+              videoDur, trackStart, trackDur)
+
         let reader = try AVAssetReader(asset: asset)
         let settings: [String: Any] = [
             AVFormatIDKey: kAudioFormatLinearPCM,
@@ -63,6 +74,16 @@ enum AudioExtractor {
         if reader.status == .failed {
             throw AudioExtractorError.readerFailed(reader.error?.localizedDescription ?? "reader failed")
         }
+
+        // Diagnostic: find the first sample with meaningful energy so we can
+        // compare with Whisper's first reported word timestamp. If Whisper
+        // says "before" at 4.44s but energy starts at 2.2s, the timestamps
+        // are drifting from the real audio.
+        let energyThreshold: Float = 0.01
+        let firstSoundIdx = samples.firstIndex { abs($0) > energyThreshold } ?? -1
+        let firstSoundSec = firstSoundIdx >= 0 ? Double(firstSoundIdx) / targetSampleRate : -1
+        NSLog("[AudioExtractor] extracted samples=%d (%.3fs @ %.0fHz), firstNonSilentSample=%.3fs",
+              samples.count, Double(samples.count) / targetSampleRate, targetSampleRate, firstSoundSec)
 
         let wavURL = try writeWav(samples: samples, sampleRate: Int(targetSampleRate))
         return Output(wavURL: wavURL, samples: samples)

@@ -34,40 +34,64 @@ struct EditorView: View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            VStack(spacing: 12) {
+            VStack(spacing: 0) {
                 topBar
+                    .padding(.top, 8)
 
-                VideoPlayer(player: player)
-                    .frame(height: 300)
-                    .background(Color.black)
-                    .cornerRadius(12)
-                    .padding(.horizontal, 12)
+                ScrollView {
+                    VStack(spacing: 12) {
+                        VideoPlayer(player: player)
+                            .frame(height: 260)
+                            .background(Color.black)
+                            .cornerRadius(12)
+                            .padding(.horizontal, 12)
 
-                statsStrip
-                    .padding(.horizontal, 12)
+                        statsStrip
+                            .padding(.horizontal, 12)
 
-                TimelineView(
-                    samples: result.samples,
-                    sampleRate: result.sampleRate,
-                    segments: result.segments,
-                    duration: result.originalDuration,
-                    keptRanges: $keptRanges,
-                    playheadTime: playheadTime,
-                    onSeek: seek(to:)
-                )
+                        TimelineView(
+                            samples: result.samples,
+                            sampleRate: result.sampleRate,
+                            segments: result.segments,
+                            duration: result.originalDuration,
+                            keptRanges: $keptRanges,
+                            playheadTime: playheadTime,
+                            onSeek: seek(to:)
+                        )
 
-                controls
+                        controls
 
-                if let errorMessage {
-                    Text(errorMessage)
-                        .foregroundColor(accent)
-                        .font(.system(size: 12))
-                        .padding(.horizontal, 16)
+                        if let errorMessage {
+                            Text(errorMessage)
+                                .foregroundColor(accent)
+                                .font(.system(size: 12))
+                                .padding(.horizontal, 16)
+                        }
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Transcript")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(.gray)
+                                .textCase(.uppercase)
+                                .padding(.horizontal, 12)
+                                .padding(.top, 8)
+
+                            TranscriptView(
+                                segments: result.segments,
+                                keptRanges: keptRanges,
+                                playheadTime: playheadTime,
+                                onWordTap: seek(to:)
+                            )
+                            .frame(minHeight: 220)
+                            .cornerRadius(10)
+                            .padding(.horizontal, 8)
+                        }
+                        .padding(.top, 8)
+                        .padding(.bottom, 24)
+                    }
+                    .padding(.top, 8)
                 }
-
-                Spacer(minLength: 0)
             }
-            .padding(.top, 8)
         }
         .onAppear {
             attachTimeObserver()

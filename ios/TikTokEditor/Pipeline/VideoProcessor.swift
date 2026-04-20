@@ -75,6 +75,13 @@ final class VideoProcessor {
         onStage(.transcribing)
         let segments = try await transcriber.transcribe(wavURL: audio.wavURL)
 
+        // Note: anchorSegmentsToAudio (below) exists but is NOT called. A
+        // single-constant shift breaks RangeLabeler because VAD ranges stay
+        // at real audio time while Whisper words move — labels go to the
+        // wrong VAD ranges. Fixing Whisper's alignment drift properly
+        // requires forced alignment (per-segment re-anchor), not a global
+        // shift. Leaving the helper in place for when we revisit this.
+
         onStage(.detectingSpeech)
         let vadRanges = try vad.detectSpeech(samples: audio.samples, totalDuration: originalDuration)
 
@@ -302,6 +309,121 @@ final class VideoProcessor {
         NSLog("[splitInternalSilence] %d ranges → %d ranges (minSilence=%.2fs)",
               ranges.count, result.count, minSilenceDuration)
         return result
+    }
+
+    /// Corrects Whisper's word-timestamp drift by re-anchoring the first
+    /// reported word to where real speech actually starts in the audio.
+    ///
+    /// WhisperKit's tiny.en model (used on simulator) drifts word timestamps
+    /// by 2-3 s at the start of a transcription when there's any leading
+    /// noise or quiet speech. If that goes uncorrected, every downstream
+    /// step sees the wrong timestamps.
+    ///
+    /// Approach: find the first run of sustained above-threshold energy
+    /// (≥ 150 ms) in the audio, compare to Whisper's first word start, and
+    /// shift every segment/word timestamp by the delta if it's > 500 ms.
+    /// Smaller deltas are left alone — Whisper usually has ~100 ms of
+    /// legitimate imprecision.
+    static func anchorSegmentsToAudio(
+        _ segments: [Segment],
+        samples: [Float],
+        sampleRate: Double
+    ) -> [Segment] {
+        guard let firstSegment = segments.first,
+              let firstWord = firstSegment.words.first,
+              !samples.isEmpty else {
+            return segments
+        }
+
+        // Compute first sustained speech start using a 10 ms RMS window.
+        let windowSamples = Int(0.010 * sampleRate)
+        guard windowSamples > 0 else { return segments }
+        let numWindows = samples.count / windowSamples
+        guard numWindows > 0 else { return segments }
+
+        var rms = [Float](repeating: 0, count: numWindows)
+        for i in 0..<numWindows {
+            let lo = i * windowSamples
+            let hi = min(lo + windowSamples, samples.count)
+            var sumSq: Float = 0
+            for j in lo..<hi { sumSq += samples[j] * samples[j] }
+            rms[i] = sqrt(sumSq / Float(hi - lo))
+        }
+
+        // Adaptive threshold: 20th-percentile silence floor × 5. Same
+        // approach as detectSpeechEdges.
+        let sorted = rms.sorted()
+        let floorIdx = min(sorted.count - 1, sorted.count / 5)
+        let silenceFloor = sorted[floorIdx]
+        let threshold = max(silenceFloor * 5.0, 0.003)
+
+        let windowSec = Double(windowSamples) / sampleRate
+        let requiredSustainWindows = max(1, Int(0.150 / windowSec))  // 150 ms
+
+        // Two-pass onset detection:
+        //   Pass 1: find first SUSTAINED run above main threshold (reliable
+        //           but late — misses the attack phase of the consonant).
+        //   Pass 2: back up from that point while RMS stays above a lower
+        //           onset threshold (2× silence floor). That gives us the
+        //           true beginning of the speech energy ramp.
+        let onsetThreshold = max(silenceFloor * 2.0, 0.0015)
+        var sustainedRunStart: Int = -1
+        var runStart: Int? = nil
+        for i in 0..<numWindows {
+            if rms[i] >= threshold {
+                if runStart == nil { runStart = i }
+                if let s = runStart, i - s + 1 >= requiredSustainWindows {
+                    sustainedRunStart = s
+                    break
+                }
+            } else {
+                runStart = nil
+            }
+        }
+
+        var actualStart: Double = -1
+        if sustainedRunStart >= 0 {
+            // Pass 2: back up to the true acoustic onset.
+            var onsetIdx = sustainedRunStart
+            while onsetIdx > 0 && rms[onsetIdx - 1] > onsetThreshold {
+                onsetIdx -= 1
+            }
+            actualStart = Double(onsetIdx) * windowSec
+        }
+
+        guard actualStart >= 0 else {
+            NSLog("[anchor] no sustained energy found; leaving segments untouched")
+            return segments
+        }
+
+        let whisperStart = firstWord.start
+        let delta = actualStart - whisperStart
+
+        NSLog("[anchor] actualSpeechStart=%.3fs whisperFirstWord=\"%@\"@%.3fs delta=%+.3fs",
+              actualStart, firstWord.word, whisperStart, delta)
+
+        // Only correct if the drift is meaningful. < 500 ms = trust Whisper.
+        guard abs(delta) > 0.5 else {
+            NSLog("[anchor] delta small enough, leaving segments untouched")
+            return segments
+        }
+
+        NSLog("[anchor] SHIFTING all word/segment timestamps by %+.3fs", delta)
+
+        return segments.map { seg in
+            Segment(
+                text: seg.text,
+                start: max(0, seg.start + delta),
+                end: max(0, seg.end + delta),
+                words: seg.words.map { w in
+                    Word(
+                        word: w.word,
+                        start: max(0, w.start + delta),
+                        end: max(0, w.end + delta)
+                    )
+                }
+            )
+        }
     }
 
     /// Snap each edge to the nearest near-zero-amplitude sample in a small
