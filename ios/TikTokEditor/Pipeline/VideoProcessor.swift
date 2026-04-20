@@ -34,18 +34,21 @@ enum ProcessingStage: String {
     case done = "Done"
 }
 
-/// Pipeline (reverted to the known-good state that produced 28.9 s output
-/// on IMG_3517 — the "this is really good" checkpoint):
+/// Pipeline (silence-only, V1 — no semantic/retake decisions):
 ///
 ///   1. Extract audio (AVAssetReader → 16 kHz mono Float32 PCM)
 ///   2. Transcribe (WhisperKit) → segments with word-level timestamps
+///      (used for the editor's transcript view and edge-detection hints only —
+///      NOT for deciding which ranges to cut)
 ///   3. VAD (Silero) → speech ranges with 50 ms leading / 20 ms trailing pad
-///   4. RangeLabeler → attach Whisper text to each VAD range
-///   5. RetakeDetector → Gemini 2.5 Pro returns keep indices
-///   6. detectSpeechEdges → energy-based endpoint detection using Whisper
-///      word timings as hints (shrinks range edges to real speech onset/offset)
-///   7. snapToQuietEdges (±3 ms) → zero-crossing polish for clean audio
-///   8. VideoCutter → AVMutableComposition concat of keep ranges
+///   4. Keep every VAD range (no Gemini, no retake detection)
+///   5. detectSpeechEdges → energy-based endpoint tightening
+///   6. snapToQuietEdges (±3 ms) → zero-crossing polish for clean audio
+///   7. VideoCutter → AVMutableComposition concat of keep ranges
+///
+/// Retakes / fumbles survive into the output. The editor (EditorView.swift)
+/// is how users remove them manually — drag the edges of kept ranges to
+/// clip anything they don't want, then re-export.
 final class VideoProcessor {
 
     private let transcriber: Transcriber
@@ -85,10 +88,11 @@ final class VideoProcessor {
         onStage(.detectingSpeech)
         let vadRanges = try vad.detectSpeech(samples: audio.samples, totalDuration: originalDuration)
 
-        let labeled = RangeLabeler.label(ranges: vadRanges, segments: segments)
-
-        onStage(.detectingRetakes)
-        let keep = await RetakeDetector.filter(labeled: labeled)
+        // SILENCE-ONLY MODE: keep every VAD range. No Gemini retake detection,
+        // no semantic cutting — just "where the user was speaking" vs "not".
+        // Retakes and fumbles survive into the output; the editor is how the
+        // user removes them manually. This is deterministic and predictable.
+        let keep = vadRanges
 
         // Tighten each kept range to its actual speech onset/offset using
         // audio RMS energy. Whisper word timings are used as hints for
