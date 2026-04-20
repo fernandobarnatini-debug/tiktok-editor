@@ -6,3 +6,10 @@ processed/
 *.pyc
 *.wav
 *.mp4
+
+# Xcode / iOS build artifacts
+ios/**/xcuserdata/
+ios/**/*.xcuserstate
+ios/DerivedData/
+ios/TikTokEditor.xcodeproj/
+.DS_Store
