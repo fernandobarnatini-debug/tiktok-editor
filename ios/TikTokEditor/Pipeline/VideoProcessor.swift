@@ -80,11 +80,23 @@ final class VideoProcessor {
         onStage(.detectingSpeech)
         let vadRanges = try vad.detectSpeech(samples: audio.samples, totalDuration: originalDuration)
 
-        // SILENCE-ONLY MODE: keep every VAD range. No Gemini retake detection,
-        // no semantic cutting — just "where the user was speaking" vs "not".
-        // Retakes and fumbles survive into the output; the editor is how the
-        // user removes them manually. This is deterministic and predictable.
-        let keep = vadRanges
+        // Attach Whisper transcript to each VAD range so RetakeFilter can
+        // compare text between adjacent ranges.
+        let allWords = segments.flatMap { $0.words }
+        let labeled: [LabeledRange] = vadRanges.map { r in
+            let text = allWords
+                .filter { $0.start < r.end && $0.end > r.start }
+                .map { $0.word }
+                .joined(separator: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return LabeledRange(start: r.start, end: r.end, text: text)
+        }
+
+        // Retake detection: drop back-to-back duplicate lines, keeping the last.
+        // Deterministic, no LLM. See RetakeFilter.swift.
+        let filtered = RetakeFilter.filter(labeled)
+        let keep = filtered.map { KeepRange(start: $0.start, end: $0.end) }
+        NSLog("[Pipeline] retake filter: %d → %d ranges", vadRanges.count, keep.count)
 
         // Tighten each kept range to its actual speech onset/offset using
         // audio RMS energy. Whisper word timings are used as hints for
