@@ -45,8 +45,8 @@ final class VAD {
         // wanted cuts to hug the edges of speech. The downstream edge
         // detector (detectSpeechEdges) still protects word boundaries.
         let keep: [KeepRange] = rawRanges.map { r in
-            let start = max(0.0, Double(r.start) / Double(Self.sampleRate) - 0.020)
-            let end = min(totalDuration, Double(r.end) / Double(Self.sampleRate) + 0.007)
+            let start = max(0.0, Double(r.start) / Double(Self.sampleRate) - 0.002)
+            let end = min(totalDuration, Double(r.end) / Double(Self.sampleRate) + 0.000)
             return KeepRange(start: round(start * 100) / 100, end: round(end * 100) / 100)
         }
 
