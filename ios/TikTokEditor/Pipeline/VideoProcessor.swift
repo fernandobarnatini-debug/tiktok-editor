@@ -29,6 +29,7 @@ enum ProcessingStage: String {
     case extractingAudio = "Extracting audio…"
     case transcribing = "Transcribing…"
     case detectingSpeech = "Detecting speech…"
+    case llmRetakeCheck = "Checking retakes…"
     case cutting = "Cutting video…"
     case done = "Done"
 }
@@ -92,9 +93,17 @@ final class VideoProcessor {
             return LabeledRange(start: r.start, end: r.end, text: text)
         }
 
+        // When creators speak fast (<90 ms pause between takes) VAD fuses
+        // multiple takes into one range. Split those ranges at Whisper's
+        // sentence-boundary punctuation so RetakeFilter can see each take.
+        let sentences = Self.splitOnPunctuation(labeled, allWords: allWords)
+        NSLog("[Pipeline] punctuation split: %d → %d ranges", labeled.count, sentences.count)
+
         // Retake detection: drop back-to-back duplicate lines, keeping the last.
-        // Deterministic, no LLM. See RetakeFilter.swift.
-        let filtered = RetakeFilter.filter(labeled)
+        // Text similarity first; Claude Haiku tiebreaker on borderline pairs.
+        // See RetakeFilter.swift + RetakeLLM.swift.
+        onStage(.llmRetakeCheck)
+        let filtered = await RetakeFilter.filter(sentences)
         let keep = filtered.map { KeepRange(start: $0.start, end: $0.end) }
         NSLog("[Pipeline] retake filter: %d → %d ranges", vadRanges.count, keep.count)
 
@@ -153,6 +162,60 @@ final class VideoProcessor {
     }
 
     // MARK: - Edge detection + snap
+
+    /// Splits each labeled range at Whisper-level sentence boundaries
+    /// (any word ending with `,` `.` `?` `!` `;`). Fixes the case where a
+    /// creator records multiple takes fast enough that VAD fuses them into
+    /// one range — we still get separate sub-ranges for retake comparison.
+    /// The silence between sub-ranges (between the terminator word and the
+    /// next word) is dropped, which also tightens dead-space removal.
+    static func splitOnPunctuation(_ ranges: [LabeledRange], allWords: [Word]) -> [LabeledRange] {
+        let terminators: Set<Character> = [",", ".", "?", "!", ";"]
+        var out: [LabeledRange] = []
+
+        for r in ranges {
+            let wordsInRange = allWords
+                .filter { $0.start < r.end && $0.end > r.start }
+                .sorted(by: { $0.start < $1.start })
+
+            guard wordsInRange.count > 1 else {
+                out.append(r)
+                continue
+            }
+
+            var chunkStart = r.start
+            var chunkWords: [Word] = []
+
+            for (idx, w) in wordsInRange.enumerated() {
+                chunkWords.append(w)
+                let last = w.word.last
+                let isTerminator = last.map { terminators.contains($0) } ?? false
+                let isLastWord = idx == wordsInRange.count - 1
+
+                if isTerminator && !isLastWord {
+                    let text = chunkWords
+                        .map { $0.word }
+                        .joined(separator: " ")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    out.append(LabeledRange(start: chunkStart, end: w.end, text: text))
+                    chunkStart = wordsInRange[idx + 1].start
+                    chunkWords = []
+                }
+            }
+
+            // Emit the trailing chunk. Use the original r.end so any trailing
+            // padding VAD added for the overall range stays intact.
+            if !chunkWords.isEmpty {
+                let text = chunkWords
+                    .map { $0.word }
+                    .joined(separator: " ")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                out.append(LabeledRange(start: chunkStart, end: r.end, text: text))
+            }
+        }
+
+        return out
+    }
 
     /// Energy-based endpoint detection. For each kept range, use Whisper's
     /// first/last word as a hint for where to look, then scan audio RMS

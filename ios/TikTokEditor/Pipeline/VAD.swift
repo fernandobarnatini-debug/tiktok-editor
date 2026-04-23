@@ -52,11 +52,12 @@ final class VAD {
 
         guard !keep.isEmpty else { return [] }
 
-        // Step 2: merge ranges with gap ≤ 0.15 s (same as analyzer.py).
+        // Step 2: merge ranges with gap ≤ 0.09 s (tighter than analyzer.py's
+        // 0.15 s — matches the pacing of the reference CapCut clip).
         var merged: [KeepRange] = [keep[0]]
         for r in keep.dropFirst() {
             let last = merged[merged.count - 1]
-            if r.start - last.end <= 0.15 {
+            if r.start - last.end <= 0.09 {
                 merged[merged.count - 1] = KeepRange(start: last.start, end: r.end)
             } else {
                 merged.append(r)

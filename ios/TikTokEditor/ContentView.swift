@@ -47,6 +47,7 @@ struct ContentView: View {
                             fillerProgressView
                         }
                         if let outputURL {
+                            previewPlayer(url: outputURL)
                             if result != nil && !isRemovingFillers {
                                 openEditorButton
                             }
@@ -192,6 +193,19 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
         .background(RoundedRectangle(cornerRadius: 12).fill(Color(white: 0.08)))
+    }
+
+    private func previewPlayer(url: URL) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Preview")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.gray)
+                .textCase(.uppercase)
+            VideoPlayer(player: AVPlayer(url: url))
+                .frame(height: 300)
+                .background(Color.black)
+                .cornerRadius(12)
+        }
     }
 
     private var openEditorButton: some View {

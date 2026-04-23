@@ -1,7 +1,10 @@
 import Foundation
 
 /// Detects when a creator said the same line back-to-back and drops all
-/// but the last take. Pure text similarity — no LLM, no API call, no cost.
+/// but the last take. Primary signal: text similarity (deterministic, free,
+/// instant). Secondary signal for borderline cases only: Claude Haiku LLM
+/// tiebreaker — catches ASR substitution errors and paraphrases that pure
+/// text comparison can't see.
 ///
 /// Rules:
 ///   1. Never drop the last range (it's always the CTA).
@@ -14,10 +17,14 @@ import Foundation
 ///      - raw-token overlap (catches literal prefix retakes like "Hey guys" → "Hey guys welcome back")
 ///      - content-token overlap (stop-words stripped — catches paraphrased
 ///        CTAs like "link in bio" / "link in bio don't sleep on it")
-///      Drop if either crosses 60 %.
+///   6. Decision:
+///      - simBest ≥ 0.60 → confident retake, drop
+///      - simBest < 0.30 → confident not-retake, keep
+///      - 0.30 ≤ simBest < 0.60 → borderline, ask Claude Haiku
 enum RetakeFilter {
 
     static let similarityThreshold: Double = 0.60
+    static let llmBorderlineLow: Double = 0.30
     static let maxTimeGapSec: Double = 15.0
     static let minWordsForRetake: Int = 2
 
@@ -40,7 +47,7 @@ enum RetakeFilter {
         "s", "t", "m", "re", "ve", "ll", "d",
     ]
 
-    static func filter(_ ranges: [LabeledRange]) -> [LabeledRange] {
+    static func filter(_ ranges: [LabeledRange]) async -> [LabeledRange] {
         guard ranges.count > 1 else { return ranges }
 
         var keep = Array(repeating: true, count: ranges.count)
@@ -60,33 +67,41 @@ enum RetakeFilter {
                 let gap = b.start - a.end
                 if gap > maxTimeGapSec { break }
 
+                // Both ranges need enough words to be retake candidates.
                 let wordsB = tokenize(b.text)
+                guard wordsA.count >= minWordsForRetake,
+                      wordsB.count >= minWordsForRetake else { continue }
+
+                // Compute both similarity metrics. Use the MAX — if either one
+                // crosses the upper threshold, it's a confident retake.
+                let simRaw = overlapRatio(wordsA, wordsB)
+
+                let contentB = wordsB.subtracting(stopWords)
+                let simContent: Double =
+                    (contentA.count >= minWordsForRetake && contentB.count >= minWordsForRetake)
+                    ? overlapRatio(contentA, contentB)
+                    : 0
+
+                let simBest = max(simRaw, simContent)
                 var matched = false
 
-                // Try raw-token overlap
-                if wordsA.count >= minWordsForRetake,
-                   wordsB.count >= minWordsForRetake {
-                    let sim = overlapRatio(wordsA, wordsB)
-                    if sim >= similarityThreshold {
+                if simBest >= similarityThreshold {
+                    // Confident retake — drop on text similarity alone.
+                    matched = true
+                    NSLog("[RetakeFilter] DROP [%d] \"%@\" — %.0f%% overlap with [%d] \"%@\"",
+                          i, a.text, simBest * 100, j, b.text)
+                } else if simBest >= llmBorderlineLow {
+                    // Borderline — ask Claude Haiku as tiebreaker.
+                    NSLog("[RetakeFilter] LLM called on [%d] \"%@\" vs [%d] \"%@\" (%.0f%% overlap)",
+                          i, a.text, j, b.text, simBest * 100)
+                    let llmYes = await RetakeLLM.isRetake(of: a.text, next: b.text)
+                    if llmYes {
                         matched = true
-                        NSLog("[RetakeFilter] DROP [%d] \"%@\" — %.0f%% raw overlap with [%d] \"%@\"",
-                              i, a.text, sim * 100, j, b.text)
+                        NSLog("[RetakeFilter] DROP [%d] \"%@\" — LLM YES vs [%d] \"%@\"",
+                              i, a.text, j, b.text)
                     }
                 }
-
-                // If raw didn't match, try content-token overlap (stop-words stripped)
-                if !matched {
-                    let contentB = wordsB.subtracting(stopWords)
-                    if contentA.count >= minWordsForRetake,
-                       contentB.count >= minWordsForRetake {
-                        let sim = overlapRatio(contentA, contentB)
-                        if sim >= similarityThreshold {
-                            matched = true
-                            NSLog("[RetakeFilter] DROP [%d] \"%@\" — %.0f%% content overlap with [%d] \"%@\"",
-                                  i, a.text, sim * 100, j, b.text)
-                        }
-                    }
-                }
+                // simBest < llmBorderlineLow → don't even ask, keep range
 
                 if matched {
                     keep[i] = false
