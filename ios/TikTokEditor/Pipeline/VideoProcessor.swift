@@ -18,7 +18,6 @@ struct ProcessingResult {
     let sampleRate: Double           // = AudioExtractor.targetSampleRate
     let originalDuration: Double
     let segments: [Segment]          // Whisper transcription with word timings
-    let initialRanges: [KeepRange]   // Raw VAD output (pre-Gemini)
     let keptRanges: [KeepRange]      // Final snapped ranges (what got exported)
     let sourceVideoURL: URL
     let outputVideoURL: URL
@@ -165,7 +164,6 @@ final class VideoProcessor {
             sampleRate: AudioExtractor.targetSampleRate,
             originalDuration: originalDuration,
             segments: segments,
-            initialRanges: vadRanges,
             keptRanges: snapped,
             sourceVideoURL: videoURL,
             outputVideoURL: outputURL
