@@ -104,8 +104,19 @@ final class VideoProcessor {
         // See RetakeFilter.swift + RetakeLLM.swift.
         onStage(.llmRetakeCheck)
         let filtered = await RetakeFilter.filter(sentences)
-        let keep = filtered.map { KeepRange(start: $0.start, end: $0.end) }
-        NSLog("[Pipeline] retake filter: %d → %d ranges", vadRanges.count, keep.count)
+
+        // Drop standalone curses / false-starts ("fuck", "wait", etc.)
+        // that aren't retakes but shouldn't survive either.
+        let defumbled = FumbleFilter.filter(filtered)
+
+        // Re-merge adjacent kept sub-ranges that are still touching each
+        // other (i.e. both sides of a punctuation split survived). This
+        // undoes the split where it wasn't needed, so the final cut doesn't
+        // chop mid-sentence commas. Only actual retake drops leave gaps.
+        let keepLabeled = defumbled.map { KeepRange(start: $0.start, end: $0.end) }
+        let keep = Self.mergeContiguous(keepLabeled)
+        NSLog("[Pipeline] retake+fumble filter: %d → %d ranges (post-merge %d)",
+              vadRanges.count, keepLabeled.count, keep.count)
 
         // Tighten each kept range to its actual speech onset/offset using
         // audio RMS energy. Whisper word timings are used as hints for
@@ -163,12 +174,36 @@ final class VideoProcessor {
 
     // MARK: - Edge detection + snap
 
+    /// Merges consecutive kept ranges whose boundaries are touching (within
+    /// a tiny tolerance). Used after RetakeFilter to undo punctuation splits
+    /// when both halves survive — preserves natural mid-sentence pauses so
+    /// we don't get choppy micro-cuts.
+    static func mergeContiguous(_ ranges: [KeepRange], tolerance: Double = 0.01) -> [KeepRange] {
+        guard let first = ranges.first else { return ranges }
+        var out: [KeepRange] = [first]
+        for r in ranges.dropFirst() {
+            let last = out[out.count - 1]
+            if r.start - last.end <= tolerance {
+                out[out.count - 1] = KeepRange(start: last.start, end: r.end)
+            } else {
+                out.append(r)
+            }
+        }
+        return out
+    }
+
     /// Splits each labeled range at Whisper-level sentence boundaries
     /// (any word ending with `,` `.` `?` `!` `;`). Fixes the case where a
     /// creator records multiple takes fast enough that VAD fuses them into
     /// one range — we still get separate sub-ranges for retake comparison.
-    /// The silence between sub-ranges (between the terminator word and the
-    /// next word) is dropped, which also tightens dead-space removal.
+    ///
+    /// IMPORTANT: sub-ranges are kept **contiguous** — the next chunk begins
+    /// exactly where the previous chunk ends (at the terminator word's end
+    /// time), not at the next word's start. This preserves the natural
+    /// breath gap between the two halves of a sentence when neither is
+    /// dropped as a retake. Audio only gets cut when RetakeFilter actually
+    /// decides to drop a sub-range. Without this, every mid-sentence comma
+    /// would produce a micro-cut in the final output.
     static func splitOnPunctuation(_ ranges: [LabeledRange], allWords: [Word]) -> [LabeledRange] {
         let terminators: Set<Character> = [",", ".", "?", "!", ";"]
         var out: [LabeledRange] = []
@@ -198,7 +233,9 @@ final class VideoProcessor {
                         .joined(separator: " ")
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                     out.append(LabeledRange(start: chunkStart, end: w.end, text: text))
-                    chunkStart = wordsInRange[idx + 1].start
+                    // Contiguous: next chunk picks up right where we ended so
+                    // the natural inter-phrase pause isn't cut out.
+                    chunkStart = w.end
                     chunkWords = []
                 }
             }
