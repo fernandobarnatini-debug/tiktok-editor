@@ -1,21 +1,27 @@
 import Foundation
 
-/// Drops single-word curses / false-starts and very short isolated ranges
-/// that slipped past RetakeFilter. Handles the case where the creator says
-/// something like "fuck" or "wait" as a standalone exclamation mid-pitch —
-/// not a retake (nothing to compare against), just abandoned speech.
+/// Drops standalone curses / false-starts / pure fillers that RetakeFilter
+/// can't catch. Handles the case where the creator says something like
+/// "fuck" or "wait" as a one-word exclamation mid-pitch — not a retake
+/// (nothing similar to compare against), just abandoned speech.
 ///
 /// Rules:
-///   1. EXACT fumble-expression match → drop (e.g. range text is just "fuck").
-///   2. Short + few words + not first/last range → drop (catches stuff like
-///      "ugh" or "uh" or a quarter-second cough that the curse list missed).
-///   3. First and last ranges are NEVER dropped (hook/CTA protection).
+///   1. EXACT fumble-expression match → drop (range text is just "fuck",
+///      "uh", "wait", etc.). Words can still be used naturally inside
+///      longer phrases (e.g. "wait let me show you") because that text
+///      won't equal "wait" exactly.
+///   2. First and last ranges are NEVER dropped (hook/CTA protection).
+///
+/// Note: an earlier "short isolated range" catch-all rule was removed
+/// because it was murdering meaningful 1-word interjections like "Yeah",
+/// "Right", "Wow", "Look" — which are core TikTok creator speech. The
+/// editor is the fallback for any rare stray noise that slips through.
 enum FumbleFilter {
 
-    /// Expressions that, when they are the ENTIRE range text, mean the
-    /// creator abandoned the thought. Kept conservative — words that can
-    /// also be used naturally ("fucking amazing", "wait let me show you")
-    /// only match when they stand alone, not when mixed with other words.
+    /// Expressions that, when they form the ENTIRE range text, mean the
+    /// creator abandoned the thought. Match is exact (after normalization)
+    /// so "fucking amazing" or "wait let me show you" are unaffected — only
+    /// the standalone single-expression case is cut.
     private static let fumbleExpressions: Set<String> = [
         // standalone curses
         "fuck", "shit", "damn", "crap", "bitch", "ass",
@@ -25,11 +31,6 @@ enum FumbleFilter {
         // pure filler
         "ugh", "agh", "argh", "huh", "eh", "uh", "um", "umm", "uhh",
     ]
-
-    /// Range is "probably a stray fumble" if it's under this duration
-    /// AND has ≤ 2 words AND is surrounded by other ranges.
-    private static let shortRangeMaxDurationSec: Double = 0.40
-    private static let shortRangeMaxWords: Int = 2
 
     static func filter(_ ranges: [LabeledRange]) -> [LabeledRange] {
         guard ranges.count > 1 else { return ranges }
@@ -42,24 +43,10 @@ enum FumbleFilter {
             if isFirst || isLast { continue }
 
             let normalized = normalize(r.text)
-            let wordCount = normalized.isEmpty
-                ? 0
-                : normalized.split(separator: " ").count
-            let duration = r.end - r.start
 
-            // Rule 1: exact fumble-expression match
             if fumbleExpressions.contains(normalized) {
                 keep[i] = false
                 NSLog("[FumbleFilter] DROP [%d] \"%@\" — fumble expression", i, r.text)
-                continue
-            }
-
-            // Rule 2: short + few words (generic catch-all)
-            if duration < shortRangeMaxDurationSec && wordCount <= shortRangeMaxWords && wordCount > 0 {
-                keep[i] = false
-                NSLog("[FumbleFilter] DROP [%d] \"%@\" — short isolated (%dw, %.2fs)",
-                      i, r.text, wordCount, duration)
-                continue
             }
         }
 
