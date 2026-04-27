@@ -83,5 +83,11 @@ enum VideoCutter {
         if exporter.status != .completed {
             throw VideoCutterError.exportFailed(exporter.error?.localizedDescription ?? "unknown")
         }
+        // Sanity check: exporter reported success but the file is missing or empty.
+        let attrs = try? FileManager.default.attributesOfItem(atPath: output.path)
+        let size = (attrs?[.size] as? NSNumber)?.intValue ?? 0
+        if size <= 0 {
+            throw VideoCutterError.exportFailed("output file missing or empty")
+        }
     }
 }

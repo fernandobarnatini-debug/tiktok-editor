@@ -23,6 +23,17 @@ struct ProcessingResult {
     let outputVideoURL: URL
 }
 
+enum VideoProcessorError: Error, LocalizedError {
+    case invalidDuration(Double)
+    case exportProducedNoFile
+    var errorDescription: String? {
+        switch self {
+        case .invalidDuration(let d): return "Video has invalid duration (\(d)s). Try a different file."
+        case .exportProducedNoFile: return "Export finished but produced no output file."
+        }
+    }
+}
+
 enum ProcessingStage: String {
     case loading = "Loading models…"
     case extractingAudio = "Extracting audio…"
@@ -74,9 +85,14 @@ final class VideoProcessor {
         let duration = try await asset.load(.duration)
         let originalDuration = CMTimeGetSeconds(duration)
         DebugLog.append("originalDuration=\(String(format: "%.2f", originalDuration))s")
+        guard originalDuration.isFinite, originalDuration > 0 else {
+            throw VideoProcessorError.invalidDuration(originalDuration)
+        }
 
         onStage(.extractingAudio)
         let audio = try await AudioExtractor.extract(from: videoURL)
+        // Clean up the intermediate WAV regardless of how this function exits.
+        defer { try? FileManager.default.removeItem(at: audio.wavURL) }
 
         onStage(.transcribing)
         let segments = try await transcriber.transcribe(wavURL: audio.wavURL)

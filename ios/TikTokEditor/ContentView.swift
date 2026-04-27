@@ -299,12 +299,21 @@ struct ContentView: View {
 
     private func process() async {
         guard let videoURL else { return }
+        // Guard against double-tap launching parallel pipelines that would
+        // race on temp files and stomp on each other's outputs.
+        guard !isProcessing else { return }
         errorMessage = nil
         isProcessing = true
         defer { isProcessing = false }
 
         let output = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("clean_\(UUID().uuidString).mp4")
+        var succeeded = false
+        defer {
+            if !succeeded {
+                try? FileManager.default.removeItem(at: output)
+            }
+        }
 
         do {
             let processor = try VideoProcessor()
@@ -316,6 +325,7 @@ struct ContentView: View {
                 self.stats = pipelineResult.stats
                 self.outputURL = output
             }
+            succeeded = true
         } catch {
             errorMessage = "Processing failed: \(error.localizedDescription)"
         }
@@ -342,16 +352,24 @@ struct ContentView: View {
                 }
                 self.errorMessage = "Re-exported with edits."
             }
+            scheduleClearMessage()
         }
     }
 
     private func removeFillers(inputURL: URL) async {
+        guard !isRemovingFillers else { return }
         errorMessage = nil
         isRemovingFillers = true
         defer { isRemovingFillers = false }
 
         let output = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("nofiller_\(UUID().uuidString).mp4")
+        var succeeded = false
+        defer {
+            if !succeeded {
+                try? FileManager.default.removeItem(at: output)
+            }
+        }
 
         do {
             let result = try await FillerRemover.process(inputURL: inputURL, outputURL: output)
@@ -367,8 +385,20 @@ struct ContentView: View {
                 self.fillersRemoved = true
                 self.errorMessage = "Removed \(result.fillersFound) filler \(result.fillersFound == 1 ? "region" : "regions")."
             }
+            succeeded = true
+            scheduleClearMessage()
         } catch {
             errorMessage = "Filler removal failed: \(error.localizedDescription)"
+        }
+    }
+
+    /// Auto-dismisses the success/info banner after 3 s so it doesn't sit on
+    /// screen forever and get mistaken for an error.
+    private func scheduleClearMessage() {
+        let snapshot = errorMessage
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            if self.errorMessage == snapshot { self.errorMessage = nil }
         }
     }
 
@@ -383,6 +413,7 @@ struct ContentView: View {
                 PHAssetCreationRequest.forAsset().addResource(with: .video, fileURL: url, options: nil)
             }
             errorMessage = "Saved to Photos."
+            scheduleClearMessage()
         } catch {
             errorMessage = "Save failed: \(error.localizedDescription)"
         }
