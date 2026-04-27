@@ -98,10 +98,16 @@ final class VideoProcessor {
             DebugLog.append("  [\(i)] \(String(format: "%.2f", r.start))→\(String(format: "%.2f", r.end)) \"\(r.text)\"")
         }
 
+        // Trim abandoned prefixes inside each range — "Place the shi oh plus..."
+        // → "plus..." — when speaker stuttered/cut-off and recovered with an
+        // interjection. Has to happen before split since the abandoned phrase
+        // usually has no punctuation between it and the recovery.
+        let (trimmedLabeled, trimmedWordsByRange) = Self.trimAbandonedPrefixes(labeled, wordsByRange)
+
         // When creators speak fast (<90 ms pause between takes) VAD fuses
         // multiple takes into one range. Split those ranges at Whisper's
         // sentence-boundary punctuation so RetakeFilter can see each take.
-        let sentences = Self.splitOnPunctuation(labeled, wordsByRange: wordsByRange)
+        let sentences = Self.splitOnPunctuation(trimmedLabeled, wordsByRange: trimmedWordsByRange)
         NSLog("[Pipeline] punctuation split: %d → %d ranges", labeled.count, sentences.count)
         DebugLog.section("LABELED (post-split)")
         DebugLog.append("split: \(labeled.count) → \(sentences.count)")
@@ -265,6 +271,82 @@ final class VideoProcessor {
         return (labels, rangeWords)
     }
 
+    /// Common interjection words a creator says when recovering from a stutter
+    /// or aborted word. When one of these appears just after a short fragment-
+    /// looking word in the first few words of a range, that prefix is the
+    /// abandoned attempt and gets trimmed.
+    private static let interjections: Set<String> = [
+        "oh", "uh", "um", "umm", "uhh", "wait", "hmm", "er", "ah", "eh",
+    ]
+
+    /// Whitelist of common ≤3-char English words. Anything ≤3 chars NOT in
+    /// here is treated as a likely word fragment ("shi-", "wha-", "th-").
+    private static let knownShortWords: Set<String> = [
+        "i", "a", "an", "the", "you", "we", "us", "my", "me", "he", "his", "she", "her", "it", "its", "him",
+        "am", "is", "are", "was", "be", "do", "go", "did", "had", "has", "may", "let", "get", "got", "ran", "saw", "say", "see", "set", "sit", "use",
+        "of", "to", "in", "on", "at", "by", "for",
+        "and", "or", "but", "if", "so", "as",
+        "yes", "no", "not", "all", "any", "now", "out", "up", "off", "old", "new", "one", "two", "ten", "six", "way", "own", "our", "won", "war", "who", "why", "how", "yet",
+        "im", "id", "ill", "ive", "youre", "youve", "hes", "shes", "its", "were", "theyre", "thats",
+        "oh", "uh", "um", "ah", "eh", "ok", "hi", "hey",
+    ]
+
+    /// Detects "abandoned prefix" pattern within a range — a stuttered/aborted
+    /// attempt followed by an interjection and the real content. Trims the
+    /// prefix so the survivor is just the real take.
+    /// Trigger: short fragment word (≤3 chars, not a common word, no end
+    /// punctuation) → interjection → ≥3 substantive words.
+    static func trimAbandonedPrefix(_ words: [Word]) -> [Word] {
+        guard words.count >= 5 else { return words }
+        let scanLimit = min(4, words.count - 3)
+        for i in 1..<scanLimit {
+            let normalized = words[i].word.lowercased()
+                .trimmingCharacters(in: .punctuationCharacters)
+            guard interjections.contains(normalized) else { continue }
+
+            let prev = words[i - 1].word
+            let endsInTerminator = prev.last.map { ".?!".contains($0) } ?? false
+            if endsInTerminator { continue }
+
+            let prevStripped = prev.lowercased()
+                .replacingOccurrences(of: "'", with: "")
+                .trimmingCharacters(in: .punctuationCharacters)
+            let isFragment = prevStripped.count <= 3 && !knownShortWords.contains(prevStripped)
+            if !isFragment { continue }
+
+            let remaining = Array(words[(i + 1)...])
+            if remaining.count >= 3 { return remaining }
+        }
+        return words
+    }
+
+    /// Wraps trimAbandonedPrefix per range, updating both labels and the
+    /// per-range word arrays. Logs every trim so we can see them later.
+    static func trimAbandonedPrefixes(_ labeled: [LabeledRange], _ wordsByRange: [[Word]]) -> (labels: [LabeledRange], wordsByRange: [[Word]]) {
+        DebugLog.section("ABANDONED PREFIX TRIM")
+        var newLabeled: [LabeledRange] = []
+        var newWords: [[Word]] = []
+        var trimCount = 0
+        for (i, words) in wordsByRange.enumerated() {
+            let trimmed = trimAbandonedPrefix(words)
+            if trimmed.count != words.count, let firstWord = trimmed.first {
+                let r = labeled[i]
+                let newText = trimmed.map { $0.word }
+                    .joined(separator: " ")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                DebugLog.append("[\(i)] trimmed \(words.count - trimmed.count) words: \"\(r.text)\" → \"\(newText)\"")
+                newLabeled.append(LabeledRange(start: firstWord.start, end: r.end, text: newText))
+                newWords.append(trimmed)
+                trimCount += 1
+            } else {
+                newLabeled.append(labeled[i])
+                newWords.append(words)
+            }
+        }
+        if trimCount == 0 { DebugLog.append("no trims applied") }
+        return (newLabeled, newWords)
+    }
+
     /// Splits each labeled range at Whisper-level sentence boundaries
     /// (any word ending with `,` `.` `?` `!` `;`). Fixes the case where a
     /// creator records multiple takes fast enough that VAD fuses them into
@@ -283,6 +365,7 @@ final class VideoProcessor {
     static func splitOnPunctuation(_ ranges: [LabeledRange], wordsByRange: [[Word]]) -> [LabeledRange] {
         let terminators: Set<Character> = [",", ".", "?", "!", ";"]
         let trailingPadSec: Double = 0.030
+        let minSplitTokens = 3
         var out: [LabeledRange] = []
 
         for (idx, r) in ranges.enumerated() {
@@ -296,13 +379,19 @@ final class VideoProcessor {
             var chunkStart = r.start
             var chunkWords: [Word] = []
 
-            for (idx, w) in wordsInRange.enumerated() {
+            for (wIdx, w) in wordsInRange.enumerated() {
                 chunkWords.append(w)
                 let last = w.word.last
                 let isTerminator = last.map { terminators.contains($0) } ?? false
-                let isLastWord = idx == wordsInRange.count - 1
+                let isLastWord = wIdx == wordsInRange.count - 1
+                let remainingWords = wordsInRange.count - wIdx - 1
 
-                if isTerminator && !isLastWord {
+                // Only split when BOTH the current chunk and what's left
+                // would have ≥ minSplitTokens words. Prevents tiny lead-in
+                // orphans like "So yeah," surviving a dropped abandoned take.
+                if isTerminator && !isLastWord
+                   && chunkWords.count >= minSplitTokens
+                   && remainingWords >= minSplitTokens {
                     let text = chunkWords
                         .map { $0.word }
                         .joined(separator: " ")
