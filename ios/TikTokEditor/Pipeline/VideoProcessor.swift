@@ -64,12 +64,16 @@ final class VideoProcessor {
         onStage: @Sendable @escaping (ProcessingStage) -> Void
     ) async throws -> ProcessingResult {
 
+        DebugLog.section("PIPELINE START")
+        DebugLog.append("video=\(videoURL.lastPathComponent)")
+
         onStage(.loading)
         try await transcriber.ensureLoaded()
 
         let asset = AVURLAsset(url: videoURL)
         let duration = try await asset.load(.duration)
         let originalDuration = CMTimeGetSeconds(duration)
+        DebugLog.append("originalDuration=\(String(format: "%.2f", originalDuration))s")
 
         onStage(.extractingAudio)
         let audio = try await AudioExtractor.extract(from: videoURL)
@@ -79,34 +83,51 @@ final class VideoProcessor {
 
         onStage(.detectingSpeech)
         let vadRanges = try vad.detectSpeech(samples: audio.samples, totalDuration: originalDuration)
+        DebugLog.section("VAD")
+        DebugLog.append("ranges=\(vadRanges.count)")
+        for (i, r) in vadRanges.enumerated() {
+            DebugLog.append("  [\(i)] \(String(format: "%.2f", r.start))→\(String(format: "%.2f", r.end)) (\(String(format: "%.2f", r.end - r.start))s)")
+        }
 
         // Attach Whisper transcript to each VAD range so RetakeFilter can
         // compare text between adjacent ranges.
         let allWords = segments.flatMap { $0.words }
-        let labeled: [LabeledRange] = vadRanges.map { r in
-            let text = allWords
-                .filter { $0.start < r.end && $0.end > r.start }
-                .map { $0.word }
-                .joined(separator: " ")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            return LabeledRange(start: r.start, end: r.end, text: text)
+        let (labeled, wordsByRange) = Self.labelRanges(vadRanges, allWords: allWords)
+        DebugLog.section("LABELED (pre-split)")
+        for (i, r) in labeled.enumerated() {
+            DebugLog.append("  [\(i)] \(String(format: "%.2f", r.start))→\(String(format: "%.2f", r.end)) \"\(r.text)\"")
         }
 
         // When creators speak fast (<90 ms pause between takes) VAD fuses
         // multiple takes into one range. Split those ranges at Whisper's
         // sentence-boundary punctuation so RetakeFilter can see each take.
-        let sentences = Self.splitOnPunctuation(labeled, allWords: allWords)
+        let sentences = Self.splitOnPunctuation(labeled, wordsByRange: wordsByRange)
         NSLog("[Pipeline] punctuation split: %d → %d ranges", labeled.count, sentences.count)
+        DebugLog.section("LABELED (post-split)")
+        DebugLog.append("split: \(labeled.count) → \(sentences.count)")
+        for (i, r) in sentences.enumerated() {
+            DebugLog.append("  [\(i)] \(String(format: "%.3f", r.start))→\(String(format: "%.3f", r.end)) \"\(r.text)\"")
+        }
 
         // Retake detection: drop back-to-back duplicate lines, keeping the last.
         // Text similarity first; Claude Haiku tiebreaker on borderline pairs.
         // See RetakeFilter.swift + RetakeLLM.swift.
         onStage(.llmRetakeCheck)
         let filtered = await RetakeFilter.filter(sentences)
+        DebugLog.section("AFTER RETAKE FILTER")
+        DebugLog.append("survivors: \(filtered.count) of \(sentences.count)")
+        for (i, r) in filtered.enumerated() {
+            DebugLog.append("  [\(i)] \(String(format: "%.3f", r.start))→\(String(format: "%.3f", r.end)) \"\(r.text)\"")
+        }
 
         // Drop standalone curses / false-starts ("fuck", "wait", etc.)
         // that aren't retakes but shouldn't survive either.
         let defumbled = FumbleFilter.filter(filtered)
+        DebugLog.section("AFTER FUMBLE FILTER")
+        DebugLog.append("survivors: \(defumbled.count) of \(filtered.count)")
+        for (i, r) in defumbled.enumerated() {
+            DebugLog.append("  [\(i)] \(String(format: "%.3f", r.start))→\(String(format: "%.3f", r.end)) \"\(r.text)\"")
+        }
 
         // Re-merge adjacent kept sub-ranges that are still touching each
         // other (i.e. both sides of a punctuation split survived). This
@@ -116,6 +137,11 @@ final class VideoProcessor {
         let keep = Self.mergeContiguous(keepLabeled)
         NSLog("[Pipeline] retake+fumble filter: %d → %d ranges (post-merge %d)",
               vadRanges.count, keepLabeled.count, keep.count)
+        DebugLog.section("AFTER MERGE")
+        DebugLog.append("merged: \(keepLabeled.count) → \(keep.count)")
+        for (i, r) in keep.enumerated() {
+            DebugLog.append("  [\(i)] \(String(format: "%.3f", r.start))→\(String(format: "%.3f", r.end))")
+        }
 
         // Tighten each kept range to its actual speech onset/offset using
         // audio RMS energy. Whisper word timings are used as hints for
@@ -138,6 +164,10 @@ final class VideoProcessor {
 
         NSLog("[Pipeline] duration=%.2fs keep=%d → edged=%d → snapped=%d",
               originalDuration, keep.count, edged.count, snapped.count)
+        DebugLog.section("AFTER EDGE+SNAP (final)")
+        for (i, r) in snapped.enumerated() {
+            DebugLog.append("  [\(i)] \(String(format: "%.3f", r.start))→\(String(format: "%.3f", r.end))")
+        }
 
         onStage(.cutting)
         try await VideoCutter.cut(source: videoURL, keep: snapped, to: outputURL)
@@ -190,6 +220,51 @@ final class VideoProcessor {
         return out
     }
 
+    /// Assigns each Whisper word to exactly one VAD range based on its start
+    /// time. A word "belongs" to the range whose [start, end) contains its
+    /// start. Words whose start falls outside any range (Whisper and Silero
+    /// disagreeing on speech edges by a few hundred ms) attach to the nearest
+    /// range — preferring the preceding range on ties (trailing-slope case),
+    /// capped at 1 s so hallucinated/far-away words don't get pulled in.
+    /// Returns both the labels and the per-range word lists so downstream
+    /// stages (splitter) can use the same assignments.
+    static func labelRanges(_ ranges: [KeepRange], allWords: [Word]) -> (labels: [LabeledRange], wordsByRange: [[Word]]) {
+        let sortedRanges = ranges.sorted { $0.start < $1.start }
+        let sortedWords = allWords.sorted { $0.start < $1.start }
+        var rangeWords: [[Word]] = Array(repeating: [], count: sortedRanges.count)
+
+        for w in sortedWords {
+            var assigned: Int? = sortedRanges.firstIndex { r in
+                w.start >= r.start && w.start < r.end
+            }
+            if assigned == nil {
+                var bestIdx: Int? = nil
+                var bestDistance: Double = .infinity
+                for (i, r) in sortedRanges.enumerated() {
+                    let distance = w.start < r.start
+                        ? r.start - w.start
+                        : w.start - r.end
+                    if distance < bestDistance {
+                        bestDistance = distance
+                        bestIdx = i
+                    }
+                }
+                if let idx = bestIdx, bestDistance <= 1.0 {
+                    assigned = idx
+                }
+            }
+            if let idx = assigned { rangeWords[idx].append(w) }
+        }
+
+        let labels = sortedRanges.enumerated().map { (i, r) -> LabeledRange in
+            let text = rangeWords[i].map { $0.word }
+                .joined(separator: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return LabeledRange(start: r.start, end: r.end, text: text)
+        }
+        return (labels, rangeWords)
+    }
+
     /// Splits each labeled range at Whisper-level sentence boundaries
     /// (any word ending with `,` `.` `?` `!` `;`). Fixes the case where a
     /// creator records multiple takes fast enough that VAD fuses them into
@@ -205,15 +280,13 @@ final class VideoProcessor {
     /// **overlap by 30 ms**. mergeContiguous handles this correctly:
     ///   - Both kept → overlap collapses into one continuous range
     ///   - One dropped → survivor keeps the trailing pad, no mid-word cut
-    static func splitOnPunctuation(_ ranges: [LabeledRange], allWords: [Word]) -> [LabeledRange] {
+    static func splitOnPunctuation(_ ranges: [LabeledRange], wordsByRange: [[Word]]) -> [LabeledRange] {
         let terminators: Set<Character> = [",", ".", "?", "!", ";"]
         let trailingPadSec: Double = 0.030
         var out: [LabeledRange] = []
 
-        for r in ranges {
-            let wordsInRange = allWords
-                .filter { $0.start < r.end && $0.end > r.start }
-                .sorted(by: { $0.start < $1.start })
+        for (idx, r) in ranges.enumerated() {
+            let wordsInRange = wordsByRange[idx]
 
             guard wordsInRange.count > 1 else {
                 out.append(r)

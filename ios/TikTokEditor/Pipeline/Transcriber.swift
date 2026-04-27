@@ -142,11 +142,9 @@ actor Transcriber {
                     )
                 }
 
-                dump += "    seg[\(seg.id)] abs=[\(String(format: "%.2f", segStart))→\(String(format: "%.2f", segEnd))] words=\(words.count) \"\(seg.text.prefix(80))\"\n"
-                if let firstWords = words.prefix(3) as ArraySlice<Word>? {
-                    for w in firstWords {
-                        dump += "      word [\(w.start)→\(w.end)] \"\(w.word)\"\n"
-                    }
+                dump += "    seg[\(seg.id)] abs=[\(String(format: "%.2f", segStart))→\(String(format: "%.2f", segEnd))] words=\(words.count) \"\(seg.text)\"\n"
+                for w in words {
+                    dump += "      word [\(w.start)→\(w.end)] \"\(w.word)\"\n"
                 }
 
                 out.append(Segment(
@@ -175,16 +173,7 @@ actor Transcriber {
     }
 
     private static func appendDebug(_ s: String) {
-        guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
-        let url = docs.appendingPathComponent("retake_debug.log")
-        let stamped = "=== WHISPER \(Date()) ===\n\(s)\n"
-        if FileManager.default.fileExists(atPath: url.path),
-           let h = try? FileHandle(forWritingTo: url) {
-            h.seekToEndOfFile()
-            h.write(Data(stamped.utf8))
-            try? h.close()
-        } else {
-            try? stamped.data(using: .utf8)?.write(to: url)
-        }
+        DebugLog.section("WHISPER")
+        DebugLog.append(s)
     }
 }

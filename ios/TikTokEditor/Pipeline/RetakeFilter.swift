@@ -48,29 +48,48 @@ enum RetakeFilter {
     ]
 
     static func filter(_ ranges: [LabeledRange]) async -> [LabeledRange] {
-        guard ranges.count > 1 else { return ranges }
+        DebugLog.section("RETAKE FILTER")
+        DebugLog.append("input: \(ranges.count) ranges")
+
+        guard ranges.count > 1 else {
+            DebugLog.append("  → only \(ranges.count) range, returning as-is")
+            return ranges
+        }
 
         var keep = Array(repeating: true, count: ranges.count)
 
         for i in 0..<ranges.count - 1 {
-            if !keep[i] { continue }
+            if !keep[i] {
+                DebugLog.append("[\(i)] SKIP (already dropped)")
+                continue
+            }
             let a = ranges[i]
             let wordsA = tokenize(a.text)
             let contentA = wordsA.subtracting(stopWords)
+            DebugLog.append("[\(i)] \"\(a.text)\" tokens=\(wordsA.sorted()) content=\(contentA.sorted())")
 
             // Walk forward through every still-kept range until we pass the
             // time window. This lets us see past short interruptions.
             for j in (i + 1)..<ranges.count {
-                if !keep[j] { continue }
+                if !keep[j] {
+                    DebugLog.append("    vs [\(j)] SKIP (already dropped)")
+                    continue
+                }
                 let b = ranges[j]
 
                 let gap = b.start - a.end
-                if gap > maxTimeGapSec { break }
+                if gap > maxTimeGapSec {
+                    DebugLog.append("    vs [\(j)] STOP (gap \(String(format: "%.2f", gap))s > \(maxTimeGapSec)s)")
+                    break
+                }
 
                 // Both ranges need enough words to be retake candidates.
                 let wordsB = tokenize(b.text)
                 guard wordsA.count >= minWordsForRetake,
-                      wordsB.count >= minWordsForRetake else { continue }
+                      wordsB.count >= minWordsForRetake else {
+                    DebugLog.append("    vs [\(j)] \"\(b.text)\" SKIP (too few words: A=\(wordsA.count) B=\(wordsB.count) min=\(minWordsForRetake))")
+                    continue
+                }
 
                 // Compute both similarity metrics. Use the MAX — if either one
                 // crosses the upper threshold, it's a confident retake.
@@ -85,21 +104,28 @@ enum RetakeFilter {
                 let simBest = max(simRaw, simContent)
                 var matched = false
 
+                DebugLog.append("    vs [\(j)] \"\(b.text)\" tokens=\(wordsB.sorted()) simRaw=\(String(format: "%.2f", simRaw)) simContent=\(String(format: "%.2f", simContent)) simBest=\(String(format: "%.2f", simBest))")
+
                 if simBest >= similarityThreshold {
                     // Confident retake — drop on text similarity alone.
                     matched = true
                     NSLog("[RetakeFilter] DROP [%d] \"%@\" — %.0f%% overlap with [%d] \"%@\"",
                           i, a.text, simBest * 100, j, b.text)
+                    DebugLog.append("      → DROP [\(i)] (similarity ≥ \(similarityThreshold))")
                 } else if simBest >= llmBorderlineLow {
                     // Borderline — ask Claude Haiku as tiebreaker.
                     NSLog("[RetakeFilter] LLM called on [%d] \"%@\" vs [%d] \"%@\" (%.0f%% overlap)",
                           i, a.text, j, b.text, simBest * 100)
+                    DebugLog.append("      → LLM tiebreaker (borderline)")
                     let llmYes = await RetakeLLM.isRetake(of: a.text, next: b.text)
+                    DebugLog.append("      → LLM replied: \(llmYes ? "YES (drop)" : "NO (keep)")")
                     if llmYes {
                         matched = true
                         NSLog("[RetakeFilter] DROP [%d] \"%@\" — LLM YES vs [%d] \"%@\"",
                               i, a.text, j, b.text)
                     }
+                } else {
+                    DebugLog.append("      → skip LLM (simBest < \(llmBorderlineLow)), continue scanning forward")
                 }
                 // simBest < llmBorderlineLow → don't even ask, keep range
 
@@ -111,9 +137,14 @@ enum RetakeFilter {
         }
 
         // Safety: never drop the final range (CTA protection).
+        if !keep[ranges.count - 1] {
+            DebugLog.append("[\(ranges.count - 1)] FORCE-KEEP (last range, CTA protection)")
+        }
         keep[ranges.count - 1] = true
 
-        return zip(ranges, keep).compactMap { $1 ? $0 : nil }
+        let survivors = zip(ranges, keep).compactMap { $1 ? $0 : nil }
+        DebugLog.append("output: \(survivors.count) survivors")
+        return survivors
     }
 
     // MARK: - Helpers
