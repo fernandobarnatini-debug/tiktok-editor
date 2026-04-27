@@ -2,6 +2,26 @@ import SwiftUI
 import PhotosUI
 import AVKit
 import Photos
+import UniformTypeIdentifiers
+
+/// Loads a video from PhotosPicker as a real on-disk file. Using
+/// loadTransferable(type: Data.self) breaks for HEVC, slow-mo, and
+/// Live Photos — iOS hands back raw asset bytes that aren't a standalone
+/// playable file. FileRepresentation makes iOS export the asset properly.
+struct PickedVideo: Transferable {
+    let url: URL
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(contentType: .movie) { picked in
+            SentTransferredFile(picked.url)
+        } importing: { received in
+            let copyURL = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("pick_\(UUID().uuidString).\(received.file.pathExtension)")
+            try? FileManager.default.removeItem(at: copyURL)
+            try FileManager.default.copyItem(at: received.file, to: copyURL)
+            return PickedVideo(url: copyURL)
+        }
+    }
+}
 
 struct ContentView: View {
 
@@ -281,15 +301,11 @@ struct ContentView: View {
         guard let item else { return }
         errorMessage = nil
         do {
-            guard let data = try await item.loadTransferable(type: Data.self) else {
+            guard let picked = try await item.loadTransferable(type: PickedVideo.self) else {
                 errorMessage = "Could not load the selected video."
                 return
             }
-            let ext = item.supportedContentTypes.first?.preferredFilenameExtension ?? "mov"
-            let url = URL(fileURLWithPath: NSTemporaryDirectory())
-                .appendingPathComponent("pick_\(UUID().uuidString).\(ext)")
-            try data.write(to: url)
-            videoURL = url
+            videoURL = picked.url
             stats = nil
             outputURL = nil
         } catch {

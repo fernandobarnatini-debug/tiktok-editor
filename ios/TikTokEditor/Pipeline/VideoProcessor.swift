@@ -88,6 +88,13 @@ final class VideoProcessor {
         guard originalDuration.isFinite, originalDuration > 0 else {
             throw VideoProcessorError.invalidDuration(originalDuration)
         }
+        // Fail fast (and with a clear message) if the picked file isn't actually
+        // a video — beats running the whole pipeline and dying at the export step.
+        let videoTracks = (try? await asset.loadTracks(withMediaType: .video)) ?? []
+        guard !videoTracks.isEmpty else {
+            DebugLog.append("ABORT: source has no video track")
+            throw VideoCutterError.noVideoTrack
+        }
 
         onStage(.extractingAudio)
         let audio = try await AudioExtractor.extract(from: videoURL)

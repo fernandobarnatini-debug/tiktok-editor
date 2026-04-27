@@ -1,11 +1,23 @@
 import Foundation
 import AVFoundation
 
-enum VideoCutterError: Error {
+enum VideoCutterError: Error, LocalizedError {
     case noVideoTrack
     case noAudioTrack
     case exportFailed(String)
     case exporterInitFailed
+    var errorDescription: String? {
+        switch self {
+        case .noVideoTrack:
+            return "Couldn't find a video track in the file. Try a different video — slow-mo and Live Photos sometimes need to be saved as a regular video first."
+        case .noAudioTrack:
+            return "Video has no audio track."
+        case .exportFailed(let msg):
+            return "Export failed: \(msg)"
+        case .exporterInitFailed:
+            return "Couldn't start the video exporter."
+        }
+    }
 }
 
 /// Mirrors cutter.py — take keep_ranges, produce a single concatenated MP4.
