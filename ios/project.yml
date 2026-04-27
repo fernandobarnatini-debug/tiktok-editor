@@ -9,6 +9,7 @@ settings:
   base:
     SWIFT_VERSION: "5.9"
     CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: U4ZJR4AQP6
     ENABLE_USER_SCRIPT_SANDBOXING: NO
 
 packages:
