@@ -195,15 +195,19 @@ final class VideoProcessor {
     /// creator records multiple takes fast enough that VAD fuses them into
     /// one range — we still get separate sub-ranges for retake comparison.
     ///
-    /// IMPORTANT: sub-ranges are kept **contiguous** — the next chunk begins
-    /// exactly where the previous chunk ends (at the terminator word's end
-    /// time), not at the next word's start. This preserves the natural
-    /// breath gap between the two halves of a sentence when neither is
-    /// dropped as a retake. Audio only gets cut when RetakeFilter actually
-    /// decides to drop a sub-range. Without this, every mid-sentence comma
-    /// would produce a micro-cut in the final output.
+    /// Sub-range ends get a 30 ms trailing pad past Whisper's reported word
+    /// end. Whisper systematically reports word boundaries ~30-80 ms early
+    /// because its CTC alignment greedily assigns trailing consonant
+    /// releases to silence/next-word. Without this pad, when one sub-range
+    /// gets dropped as a retake, the surviving sub-range gets cut
+    /// mid-syllable (e.g. "Not one" → "Not on—"). The next sub-range still
+    /// starts at the unpadded word boundary, so adjacent sub-ranges
+    /// **overlap by 30 ms**. mergeContiguous handles this correctly:
+    ///   - Both kept → overlap collapses into one continuous range
+    ///   - One dropped → survivor keeps the trailing pad, no mid-word cut
     static func splitOnPunctuation(_ ranges: [LabeledRange], allWords: [Word]) -> [LabeledRange] {
         let terminators: Set<Character> = [",", ".", "?", "!", ";"]
+        let trailingPadSec: Double = 0.030
         var out: [LabeledRange] = []
 
         for r in ranges {
@@ -230,9 +234,12 @@ final class VideoProcessor {
                         .map { $0.word }
                         .joined(separator: " ")
                         .trimmingCharacters(in: .whitespacesAndNewlines)
-                    out.append(LabeledRange(start: chunkStart, end: w.end, text: text))
-                    // Contiguous: next chunk picks up right where we ended so
-                    // the natural inter-phrase pause isn't cut out.
+                    // Pad the end past Whisper's word boundary, but never
+                    // exceed the parent VAD range's end.
+                    let paddedEnd = min(r.end, w.end + trailingPadSec)
+                    out.append(LabeledRange(start: chunkStart, end: paddedEnd, text: text))
+                    // Next chunk starts at the unpadded boundary so adjacent
+                    // sub-ranges overlap by `trailingPadSec`.
                     chunkStart = w.end
                     chunkWords = []
                 }
