@@ -158,23 +158,11 @@ final class VideoProcessor {
             DebugLog.append("  [\(i)] \(String(format: "%.3f", r.start))→\(String(format: "%.3f", r.end)) \"\(r.text)\"")
         }
 
-        // Final cleanup: drop ranges that are essentially noise.
-        //   1. Empty-text ranges — VAD detected speech but Whisper got
-        //      no words (background noise, breath, off-screen sounds).
-        //   2. Single-word ranges < 0.5 s — orphan fragments from
-        //      "All right" → "right." where VAD only caught the tail.
-        let cleaned = Self.dropEmptyAndFragments(defumbled)
-        DebugLog.section("AFTER NOISE CLEANUP")
-        DebugLog.append("survivors: \(cleaned.count) of \(defumbled.count)")
-        for (i, r) in cleaned.enumerated() {
-            DebugLog.append("  [\(i)] \(String(format: "%.3f", r.start))→\(String(format: "%.3f", r.end)) \"\(r.text)\"")
-        }
-
         // Re-merge adjacent kept sub-ranges that are still touching each
         // other (i.e. both sides of a punctuation split survived). This
         // undoes the split where it wasn't needed, so the final cut doesn't
         // chop mid-sentence commas. Only actual retake drops leave gaps.
-        let keepLabeled = cleaned.map { KeepRange(start: $0.start, end: $0.end) }
+        let keepLabeled = defumbled.map { KeepRange(start: $0.start, end: $0.end) }
         let keep = Self.mergeContiguous(keepLabeled)
         NSLog("[Pipeline] retake+fumble filter: %d → %d ranges (post-merge %d)",
               vadRanges.count, keepLabeled.count, keep.count)
@@ -242,26 +230,6 @@ final class VideoProcessor {
     }
 
     // MARK: - Edge detection + snap
-
-    /// Final cleanup pass: kills two classes of garbage that survive the
-    /// retake/fumble filters because there's nothing to compare them to:
-    ///   - Empty-text ranges (VAD heard noise, Whisper got no words)
-    ///   - Single-word fragments under 0.5 s (e.g. "right." surviving from
-    ///     a clipped "All right" where VAD missed the leading word)
-    /// Both produce silent slivers and orphan one-word clips in the output.
-    static func dropEmptyAndFragments(_ ranges: [LabeledRange]) -> [LabeledRange] {
-        ranges.compactMap { r in
-            let trimmed = r.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty { return nil }
-            let wordCount = trimmed
-                .components(separatedBy: .whitespaces)
-                .filter { !$0.isEmpty }
-                .count
-            let duration = r.end - r.start
-            if wordCount <= 1 && duration < 0.5 { return nil }
-            return r
-        }
-    }
 
     /// Merges consecutive kept ranges whose boundaries are touching (within
     /// a tiny tolerance). Used after RetakeFilter to undo punctuation splits
