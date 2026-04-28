@@ -27,6 +27,9 @@ enum RetakeFilter {
     static let llmBorderlineLow: Double = 0.30
     static let maxTimeGapSec: Double = 15.0
     static let minWordsForRetake: Int = 2
+    /// Skip retake comparison when one range is more than this many times
+    /// larger than the other — fragments can't be retakes of full sentences.
+    static let sizeMismatchCap: Double = 3.0
 
     /// Words we strip before computing content similarity. Keeps the comparison
     /// focused on content words. Kept conservative — we don't want to strip
@@ -88,6 +91,18 @@ enum RetakeFilter {
                 guard wordsA.count >= minWordsForRetake,
                       wordsB.count >= minWordsForRetake else {
                     DebugLog.append("    vs [\(j)] \"\(b.text)\" SKIP (too few words: A=\(wordsA.count) B=\(wordsB.count) min=\(minWordsForRetake))")
+                    continue
+                }
+
+                // Size-ratio guard: a long sentence and a short fragment can't
+                // realistically be retakes of each other. Without this, a
+                // 3-word filler like "they're like" can incidentally share
+                // 2 common words with a 16-word sentence and trigger a
+                // false 67% similarity (2 / min(3,16) = 0.67).
+                let sizeRatio = Double(max(wordsA.count, wordsB.count))
+                              / Double(min(wordsA.count, wordsB.count))
+                if sizeRatio > sizeMismatchCap {
+                    DebugLog.append("    vs [\(j)] \"\(b.text)\" SKIP (size ratio \(String(format: "%.1f", sizeRatio))x > \(sizeMismatchCap)x — fragment vs sentence)")
                     continue
                 }
 
